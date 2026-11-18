@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>><></title>
+<script type="module" src="https://pyscript.net/releases/2026.3.1/core.js"></script>
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: #082436; }
+pre, #m { font: 15px/1.15 Menlo, Consolas, monospace; margin: 0; white-space: pre; }
+@media (max-width: 700px) { pre, #m { font-size: 11px; } }
+pre { position: fixed; inset: 0; color: #2b6585; user-select: none; -webkit-user-select: none; }
+#m { position: absolute; visibility: hidden; }
+.s { color: #c9ab6e } .k { color: #e0c48a } .r { color: #7d8b96 }
+.g { color: #3fbf6f } .h { color: #2a9a58 } .f { color: #ffd166 } .b { color: #9fd8ff }
+.o { color: #ff8c42 } .y { color: #ffd23f } .t { color: #4fd1c5 }
+.p { color: #ff4f8b } .v { color: #c084fc }
+</style>
+</head>
+<body>
+<pre id="tank"></pre>
+<span id="m">MMMMMMMMMM</span>
+
+<script type="mpy">
+import random, math, asyncio
+from pyscript import document, window, when
+
+small = ["><>", ">))'>", "><=>"]
+big = ["><(((º>", "><{{{º>", "><(((('>"]
+
+castle = [
+    "      |>     ",
+    "      |      ",
+    "     /_\\     ",
+    " _  |[ ]|  _ ",
+    "|^|_|   |_|^|",
+    "|  _  _  _  |",
+    "| |_||_||_| |",
+    "|____/^\\____|",
+]
+
+flip = {"<": ">", ">": "<", "(": ")", ")": "(", "{": "}", "}": "{"}
+
+def mirror(s):
+    out = ""
+    for c in s:
+        out = flip.get(c, c) + out
+    return out
+
+def r(a, b):
+    return a + random.random() * (b - a)
+
+def coin(p=0.5):
+    return random.random() < p
+
+def pick(xs):
+    return xs[int(random.random() * len(xs))]
+
+def dist(a, b):
+    dx = a[0] - b[0]
+    dy = (a[1] - b[1]) * 2  # chars are ~2x tall
+    return math.sqrt(dx * dx + dy * dy)
+
+tank = document.getElementById("tank")
+W, H, cw, ch = 80, 24, 9, 17
+fish, food, bubbles = [], [], []
+sand, weeds, rocks = [], [], []
+cx = -1
+t = 0
+
+
+class Fish:
+    def __init__(self, kind, x=None):
+        self.kind = kind
+        self.d = 1 if coin() else -1
+        self.set_shape()
+        self.x = x if x is not None else (-len(self.art) if self.d > 0 else W)
+        self.y = r(1, H - 4)
+        self.cruise = r(0.12, 0.3) if kind == "small" else r(0.1, 0.22)
+        self.vx = self.d * self.cruise
+        self.vy = 0
+        self.hunger = r(0, 30)
+        self.meals = 0
+        self.dead = False
+
+    def set_shape(self):
+        self.art = pick(small if self.kind == "small" else big)
+        self.color = pick("oyt") if self.kind == "small" else pick("pv")
+
+    def shape(self):
+        return self.art if self.d > 0 else mirror(self.art)
+
+    def mouth(self):
+        return (self.x + len(self.art) - 1 if self.d > 0 else self.x, self.y)
+
+    def mid(self):
+        return (self.x + len(self.art) / 2, self.y)
+
+    def go(self, tx, ty, speed):
+        x, y = self.mid()
+        dx, dy = tx - x, ty - y
+        n = math.sqrt(dx * dx + dy * dy) or 1
+        self.vx += (dx / n * speed - self.vx) * 0.3
+        self.vy += (dy / n * speed * 0.6 - self.vy) * 0.3
+
+    def visible(self):
+        return -len(self.art) < self.x < W
+
+
+def alive(kind):
+    return [f for f in fish if not f.dead and f.kind == kind and f.visible()]
+
+
+def closest(p, items, pos):
+    best, bd = None, 1e9
+    for it in items:
+        d = dist(p, pos(it))
+        if d < bd:
+            best, bd = it, d
+    return best, bd
+
+
+def setup():
+    global W, H, cw, ch, cx, sand, weeds, rocks
+    box = document.getElementById("m").getBoundingClientRect()
+    cw, ch = box.width / 10, box.height
+    W = max(20, int(window.innerWidth / cw))
+    H = max(12, int(window.innerHeight / ch))
+
+    sand = ["".join(pick("..,._-.,.") for _ in range(W)) for _ in range(2)]
+    cx = int(W * 0.68) if W > 25 else -1
+    rocks = [(int(r(2, W - 6)), pick(["_/^\\_", "(@)", "o", "_/\\_"])) for _ in range(max(2, W // 25))]
+
+    weeds = []
+    x = 2
+    while x < W - 1:
+        if not (cx >= 0 and cx - 2 <= x <= cx + 14):
+            weeds.append((x, int(r(3, max(4, (H - 2) // 3 + 1))), pick("gh")))
+        x += int(r(4, 10))
+
+
+def how_many():
+    return max(6, W * H // 160)
+
+
+def swim(f):
+    f.hunger = min(100, f.hunger + (0.12 if f.kind == "big" else 0.18))
+    base = 0.35 if f.kind == "small" else 0.3
+    m = f.mouth()
+
+    danger, dd = (None, 1e9)
+    if f.kind == "small":
+        danger, dd = closest(f.mid(), alive("big"), lambda o: o.mid())
+
+    if danger and dd < 9 and danger.hunger > 30:
+        (x, y), (ex, ey) = f.mid(), danger.mid()
+        f.go(x + (x - ex) * 3, y + (y - ey) * 3, base * 1.5)
+    elif f.hunger > 35 and food and f.visible():
+        p, _ = closest(m, food, lambda p: p)
+        f.go(p[0], p[1], base * 1.4)
+    elif f.kind == "big" and f.hunger > 55 and f.visible() and alive("small"):
+        prey, _ = closest(m, alive("small"), lambda o: o.mid())
+        px, py = prey.mid()
+        f.go(px, py, base * 1.8)
+    else:
+        f.vx += (f.d * f.cruise - f.vx) * 0.05
+        if coin(0.03):
+            f.vy = r(-0.06, 0.06)
+
+    f.x += f.vx
+    f.y = min(max(f.y + f.vy, 0), H - 3)
+    if abs(f.vx) > 0.03:
+        f.d = 1 if f.vx > 0 else -1
+
+    if f.x < -len(f.art) - 3 or f.x > W + 3:
+        f.dead = True
+        return
+
+    mx, my = f.mouth()
+    for p in food:
+        if abs(mx - p[0]) < 1.5 and abs(my - p[1]) < 1:
+            food.remove(p)
+            f.hunger = max(0, f.hunger - 35)
+            f.meals += 1
+            if f.kind == "small" and f.meals >= 3:
+                f.kind, f.meals = "big", 0
+                f.set_shape()
+            break
+
+    if f.kind == "big" and f.hunger > 30:
+        for s in alive("small"):
+            if s.x - 0.5 <= mx <= s.x + len(s.art) + 0.5 and abs(s.y - my) < 0.9:
+                s.dead = True
+                f.hunger = 0
+                break
+
+
+def step():
+    for f in fish:
+        if not f.dead:
+            swim(f)
+    fish[:] = [f for f in fish if not f.dead]
+
+    if len(fish) < how_many() and coin(0.08):
+        fish.append(Fish("big" if coin(0.25) else "small"))
+
+    floor = H - 3
+    for p in food[:]:
+        if p[1] < floor:
+            p[1] += 0.12
+        else:
+            p[1] = floor
+            p[2] += 1
+            if p[2] > 250:
+                food.remove(p)
+
+    if coin(min(0.6, W / 600)):
+        bubbles.append([r(1, W - 1), floor])
+    for b in bubbles[:]:
+        b[1] -= 0.25
+        if coin(0.1):
+            b[0] += pick([-1, 1])
+        if b[1] < 0:
+            bubbles.remove(b)
+
+
+def draw():
+    grid = [[" "] * W for _ in range(H)]
+    col = [[""] * W for _ in range(H)]
+
+    def put(x, y, c, k):
+        x, y = int(x + 0.5), int(y + 0.5)
+        if 0 <= x < W and 0 <= y < H:
+            grid[y][x] = c
+            col[y][x] = k
+
+    for i in range(2):
+        for x in range(W):
+            put(x, H - 2 + i, sand[i][x], "s")
+
+    floor = H - 3
+    for x, art in rocks:
+        for i, c in enumerate(art):
+            put(x + i, floor, c, "r")
+
+    if cx >= 0:
+        top = floor - len(castle) + 1
+        for j, line in enumerate(castle):
+            for i, c in enumerate(line):
+                if c != " ":
+                    put(cx + i, top + j, c, "k")
+
+    sway = (t // 6) % 2
+    for x, h, k in weeds:
+        for i in range(h):
+            put(x, floor - i, "()"[(i + sway) % 2], k)
+
+    for p in food:
+        put(p[0], p[1], "*", "f")
+    for x, y in bubbles:
+        put(x, y, "." if y > H * 0.6 else "o" if y > H * 0.3 else "O", "b")
+    for f in fish:
+        for i, c in enumerate(f.shape()):
+            put(int(f.x + 0.5) + i, f.y, c, f.color)
+
+    rows = []
+    for y in range(H):
+        line, run, last = "", "", None
+        for x in range(W + 1):
+            k = col[y][x] if x < W else "end"
+            if k != last:
+                if run:
+                    line += '<span class="%s">%s</span>' % (last, run) if last else run
+                run, last = "", k
+            if x < W:
+                c = grid[y][x]
+                run += "&lt;" if c == "<" else "&gt;" if c == ">" else c
+        rows.append(line)
+    tank.innerHTML = "\n".join(rows)
+
+
+@when("click", "#tank")
+def feed(e):
+    x, y = int(e.clientX / cw), int(e.clientY / ch)
+    if y < H - 2:
+        for dx in (-1, 0, 1):
+            food.append([x + dx, y + r(-0.5, 0.5), 0])
+
+
+async def main():
+    global t
+    size = (window.innerWidth, window.innerHeight)
+    while True:
+        if (window.innerWidth, window.innerHeight) != size:
+            size = (window.innerWidth, window.innerHeight)
+            setup()
+        t += 1
+        step()
+        draw()
+        await asyncio.sleep(0.1)
+
+
+setup()
+for _ in range(how_many()):
+    fish.append(Fish("big" if coin(0.25) else "small", x=r(0, W - 8)))
+asyncio.create_task(main())
+</script>
+</body>
+</html>
